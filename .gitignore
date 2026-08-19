@@ -20,3 +20,11 @@ tools/preview/*.png
 
 # yt-dlp 단독 바이너리 (36MB). 저장소에 넣지 않고 README 대로 내려받는다.
 host/bin/
+
+# 동작 파일은 남의 영상에서 뽑아낸 것이라 저장소에 넣지 않는다.
+# host/extract_motion.py 로 언제든 다시 만들 수 있다.
+motion/*.motion
+motion/*.mp4
+
+# 자세 추정 모델 (5.5MB). README 대로 내려받는다.
+host/models/

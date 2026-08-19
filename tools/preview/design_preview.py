@@ -63,19 +63,22 @@ def draw_scanlines(c, phase):
 
 # ── 아래쪽 스펙트럼 막대 ────────────────────────────────
 BAR_COUNT = 16
-BAR_W, BAR_GAP = 6, 2
-BAR_BOTTOM = 63
-BAR_MAX = 20
+BAR_H, BAR_GAP = 3, 1      # 막대 하나가 세로 3픽셀, 사이 1픽셀 → 16개가 64픽셀에 딱 맞는다
+BAR_LEFT = 0
+BAR_MAX = 21               # 오른쪽으로 뻗는 최대 길이
 
 
 def draw_bars(c, levels):
-    """levels: 0~15 값 16개. 막대는 배경 위에 덮어 그린다."""
+    """왼쪽 세로 막대. 위에서 아래로 저역→고역.
+
+    아래쪽 가로 막대는 화면 높이를 20픽셀이나 먹어서 캐릭터가 들어갈 자리가 없었다.
+    왼쪽으로 세우면 형체가 세로를 거의 다 쓸 수 있다.
+    """
     for i, v in enumerate(levels):
-        h = max(1, round(v * BAR_MAX / 15))
-        x = i * (BAR_W + BAR_GAP)
-        # 막대 뒤 배경을 지워서 지구본 선과 겹치지 않게 한다
-        c.rect(x, BAR_BOTTOM - BAR_MAX, BAR_W, BAR_MAX + 1, fill=True, on=0)
-        c.rect(x, BAR_BOTTOM - h + 1, BAR_W, h, fill=True, on=1)
+        w = max(1, round(v * BAR_MAX / 15))
+        y = i * (BAR_H + BAR_GAP)
+        c.rect(BAR_LEFT, y, BAR_MAX + 1, BAR_H, fill=True, on=0)   # 뒤를 지우고
+        c.rect(BAR_LEFT, y, w, BAR_H, fill=True, on=1)
 
 
 def fake_levels(seed):

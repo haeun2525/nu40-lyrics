@@ -68,6 +68,28 @@ def measure(text, size=1):
     return sum((HANGUL_ADVANCE if is_hangul(c) else ASCII_ADVANCE) * size for c in text)
 
 
+# 켜짐/꺼짐밖에 없는 화면에서 '회색'을 만드는 방법.
+#
+# 점을 바둑판처럼 흩뿌리는 방식(베이어 디더링)을 먼저 써봤는데, 몸통 폭이 20픽셀뿐이라
+# 점이 눈에 그대로 잡혀서 얼룩으로 보였다. 그래서 **가로 빗금**으로 바꿨다.
+# 연필 그림의 해칭과 같은 원리라 같은 밀도에서도 훨씬 매끄러운 회색으로 읽히고,
+# 픽셀이 규칙적으로 줄지어 있어서 '의도한 무늬'로 보인다.
+#
+#   1.0  꽉 참        모든 줄
+#   0.5  중간 회색    두 줄에 한 줄
+#   0.3  어두운 회색  세 줄에 한 줄
+def tone_on(x, y, tone):
+    if tone >= 1.0:
+        return 1
+    if tone <= 0.0:
+        return 0
+    if tone >= 0.66:
+        return 0 if (int(y) & 3) == 3 else 1      # 네 줄에 세 줄
+    if tone >= 0.4:
+        return 1 if (int(y) & 1) == 0 else 0      # 두 줄에 한 줄
+    return 1 if (int(y) % 3) == 0 else 0          # 세 줄에 한 줄
+
+
 class Canvas:
     def __init__(self):
         self.px = [[0] * W for _ in range(H)]
@@ -200,6 +222,74 @@ class Canvas:
 
     def center_outline(self, y, s, size=1):
         return self.outline_text((W - measure(s, size)) // 2, y, s, size)
+
+    def fill_poly(self, pts, on=1):
+        """볼록/오목 다각형 채우기(스캔라인). 펌웨어에서는 fillTriangle 두 번으로 같은 모양이 나온다."""
+        if len(pts) < 3:
+            return
+        ys = [int(round(p[1])) for p in pts]
+        for y in range(max(0, min(ys)), min(H - 1, max(ys)) + 1):
+            xs = []
+            for i in range(len(pts)):
+                x0, y0 = pts[i]
+                x1, y1 = pts[(i + 1) % len(pts)]
+                if (y0 <= y < y1) or (y1 <= y < y0):
+                    t = (y - y0) / (y1 - y0)
+                    xs.append(x0 + t * (x1 - x0))
+            xs.sort()
+            for i in range(0, len(xs) - 1, 2):
+                for x in range(int(round(xs[i])), int(round(xs[i + 1])) + 1):
+                    self.pixel(x, y, on)
+
+    def fill_circle(self, cx, cy, r, on=1):
+        cx, cy, r = int(cx), int(cy), int(r)
+        for y in range(-r, r + 1):
+            span = int((r * r - y * y) ** 0.5)
+            for x in range(-span, span + 1):
+                self.pixel(cx + x, cy + y, on)
+
+    def thick_seg(self, x0, y0, x1, y1, w0, w1, on=1):
+        """굵기가 변하는 선분(사다리꼴). 팔이 어깨 쪽은 굵고 손 쪽은 가늘어진다."""
+        dx, dy = x1 - x0, y1 - y0
+        L = (dx * dx + dy * dy) ** 0.5 or 1.0
+        nx, ny = -dy / L, dx / L
+        self.fill_poly([(x0 + nx * w0, y0 + ny * w0), (x1 + nx * w1, y1 + ny * w1),
+                        (x1 - nx * w1, y1 - ny * w1), (x0 - nx * w0, y0 - ny * w0)], on)
+
+    def fill_poly_tone(self, pts, tone):
+        """다각형을 지정한 밝기로 칠한다. 겹쳐 칠하면 나중 것이 이긴다(음영을 덮어씌운다)."""
+        if len(pts) < 3:
+            return
+        ys = [int(round(q[1])) for q in pts]
+        for y in range(max(0, min(ys)), min(H - 1, max(ys)) + 1):
+            xs = []
+            for i in range(len(pts)):
+                x0, y0 = pts[i]
+                x1, y1 = pts[(i + 1) % len(pts)]
+                if (y0 <= y < y1) or (y1 <= y < y0):
+                    t = (y - y0) / (y1 - y0)
+                    xs.append(x0 + t * (x1 - x0))
+            xs.sort()
+            for i in range(0, len(xs) - 1, 2):
+                for x in range(int(round(xs[i])), int(round(xs[i + 1])) + 1):
+                    self.pixel(x, y, tone_on(x, y, tone))
+
+    def fill_ellipse_tone(self, cx, cy, rx, ry, tone):
+        for y in range(int(cy - ry), int(cy + ry) + 1):
+            dy = (y - cy) / max(ry, 1e-6)
+            if abs(dy) > 1:
+                continue
+            span = rx * (1 - dy * dy) ** 0.5
+            for x in range(int(cx - span), int(cx + span) + 1):
+                self.pixel(x, y, tone_on(x, y, tone))
+
+    def seg_tone(self, x0, y0, x1, y1, w0, w1, tone):
+        """굵기가 변하는 선분을 지정한 밝기로."""
+        dx, dy = x1 - x0, y1 - y0
+        L = (dx * dx + dy * dy) ** 0.5 or 1.0
+        nx, ny = -dy / L, dx / L
+        self.fill_poly_tone([(x0 + nx * w0, y0 + ny * w0), (x1 + nx * w1, y1 + ny * w1),
+                             (x1 - nx * w1, y1 - ny * w1), (x0 - nx * w0, y0 - ny * w0)], tone)
 
 def save_png(canvas, path, scale=6):
     """켜진 픽셀은 흰색, 꺼진 픽셀은 진한 남색으로 (실제 OLED 느낌)."""

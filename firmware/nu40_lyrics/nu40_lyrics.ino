@@ -69,7 +69,13 @@ static const uint8_t BAR_COUNT  = 16;
 static const int16_t BAR_W      = 6;
 static const int16_t BAR_GAP    = 2;
 static const int16_t BAR_BOTTOM = 63;  // 막대가 서 있는 바닥
-static const int16_t BAR_MAX    = 20;  // 막대 최대 높이
+static const int16_t BAR_MAX    = 20;  // 가사 모드에서 아래 가로 막대의 최대 높이
+
+// 댄스 모드에서는 막대를 왼쪽 세로줄로 세운다.
+// 아래 가로 막대는 화면 높이를 20픽셀 먹어서 캐릭터가 들어갈 자리가 없다.
+static const int16_t VBAR_H    = 3;    // 막대 하나의 두께
+static const int16_t VBAR_GAP  = 1;    // 16개가 (3+1)*16 = 64픽셀에 딱 맞는다
+static const int16_t VBAR_MAX  = 21;   // 오른쪽으로 뻗는 최대 길이
 
 // 가사 한 조각의 최대 길이. 한글 21자(63바이트)면 충분하고도 남는다.
 // PC가 화면 폭(116픽셀)에 맞춰 미리 잘라서 보내기 때문에 여기까지 올 일은 없다.
@@ -83,6 +89,13 @@ static uint8_t barLevel[BAR_COUNT];             // 0~255. PC가 보내준 값
 static uint8_t barShown[BAR_COUNT];             // 실제로 그리는 값. 떨어질 때만 천천히 내려온다
 static uint8_t beatLevel = 0;                   // 0~255. 저역 타격 세기. 배경이 이걸 보고 반응한다
 static uint8_t currentBg = 0;                   // 지금 배경 (0~3). 버튼으로 바꾼다
+
+// 댄스 모드. PC 가 관절 좌표를 보내주면 가사 대신 사람 형체를 그린다.
+// 좌표는 PC 가 이미 화면 크기로 맞춰서 보낸다 — 보드는 선만 긋는다.
+static const uint8_t JOINT_COUNT = 9;
+static uint8_t poseXY[JOINT_COUNT * 2];         // 머리,어깨LR,팔꿈치LR,손목LR,골반LR
+static bool     poseActive  = false;
+static uint32_t lastPoseMs  = 0;
 
 static bool     displayOk   = false;
 static bool     linkActive  = false;   // PC에서 프레임을 한 번이라도 받았는지
@@ -113,6 +126,7 @@ static uint8_t rxCheck   = 0;
 
 static const uint8_t KIND_BARS  = 0x01;
 static const uint8_t KIND_LYRIC = 0x02;
+static const uint8_t KIND_POSE  = 0x03;   // 댄스 모드 — 관절 9개의 화면 좌표
 
 // ─────────────────────────────────────────────────────────────
 // 준비 단계
@@ -198,7 +212,14 @@ void readSerial() {
         if (rxKind == KIND_BARS) {
           rxNeed  = BAR_COUNT + 1;   // 막대 16개 + 비트 1바이트
           rxState = WAIT_BODY;
-        } else if (rxKind == KIND_LYRIC) {
+        } else if (rxKind == KIND_POSE) {
+          rxNeed  = JOINT_COUNT * 2;
+          rxState = WAIT_BODY;
+        } else if (rxKind == KIND_POSE) {
+    memcpy(poseXY, rxBuf, JOINT_COUNT * 2);
+    poseActive = true;
+    lastPoseMs = millis();
+  } else if (rxKind == KIND_LYRIC) {
           rxState = WAIT_LEN;
         } else {
           rxState = WAIT_SYNC1;   // 모르는 종류는 버린다
@@ -233,6 +254,10 @@ void applyFrame() {
   if (rxKind == KIND_BARS) {
     for (uint8_t i = 0; i < BAR_COUNT; i++) barLevel[i] = rxBuf[i];
     beatLevel = rxBuf[BAR_COUNT];
+  } else if (rxKind == KIND_POSE) {
+    memcpy(poseXY, rxBuf, JOINT_COUNT * 2);
+    poseActive = true;
+    lastPoseMs = millis();
   } else if (rxKind == KIND_LYRIC) {
     uint8_t n = rxGot > LYRIC_MAX ? LYRIC_MAX : rxGot;
     memcpy(lyricText, rxBuf, n);
@@ -576,6 +601,156 @@ void drawLyric(const char* text, bool outline) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// 댄스 모드 — 관절 9개로 상반신 형체를 그린다
+//
+// 전신이 아니라 상반신만 그린다. 숏폼 안무는 다리가 화면에 안 들어와서
+// 발목·무릎을 못 믿는다. 없는 걸 지어내느니 안 그리는 게 낫다.
+// 좌표 계산은 PC 가 다 해서 보내주므로 여기서는 선만 긋는다.
+// tools/preview/render_motion.py 와 같은 순서로 그려야 화면이 일치한다.
+// ─────────────────────────────────────────────────────────────
+enum { J_HEAD, J_SH_L, J_SH_R, J_EL_L, J_EL_R, J_WR_L, J_WR_R, J_HIP_L, J_HIP_R };
+
+static inline float jx(uint8_t j) { return (float)poseXY[j * 2]; }
+static inline float jy(uint8_t j) { return (float)poseXY[j * 2 + 1]; }
+
+// 밝기 단계. 화면은 켜짐/꺼짐뿐이라 회색이 없어서 가로 빗금으로 흉내 낸다.
+//
+// 점을 바둑판처럼 흩뿌리는 방식을 먼저 써봤는데, 몸통 폭이 20픽셀뿐이라 점이 눈에
+// 그대로 잡혀서 얼룩으로 보였다. 가로 빗금은 연필 그림의 해칭과 같은 원리라
+// 같은 밀도에서도 매끄러운 회색으로 읽힌다.
+// tools/preview/oled.py 의 tone_on() 과 규칙이 같아야 미리보기와 화면이 일치한다.
+static const uint8_t TONE_LIT  = 3;   // 꽉 참
+static const uint8_t TONE_MID  = 2;   // 두 줄에 한 줄
+static const uint8_t TONE_DARK = 1;   // 세 줄에 한 줄
+
+static inline bool toneOn(int16_t y, uint8_t tone) {
+  if (tone >= TONE_LIT) return true;
+  if (tone == TONE_MID) return (y & 1) == 0;
+  return (y % 3) == 0;
+}
+
+// 다각형을 빗금 밝기로 채운다(스캔라인). 겹쳐 칠하면 나중 것이 이긴다.
+static const uint8_t POLY_MAX = 6;
+
+void fillPolyTone(const float* px, const float* py, uint8_t n, uint8_t tone) {
+  float minY = py[0], maxY = py[0];
+  for (uint8_t i = 1; i < n; i++) {
+    if (py[i] < minY) minY = py[i];
+    if (py[i] > maxY) maxY = py[i];
+  }
+  int16_t y0 = (int16_t)floorf(minY), y1 = (int16_t)ceilf(maxY);
+  if (y0 < 0) y0 = 0;
+  if (y1 > SCREEN_HEIGHT - 1) y1 = SCREEN_HEIGHT - 1;
+
+  for (int16_t y = y0; y <= y1; y++) {
+    float xs[POLY_MAX * 2];
+    uint8_t cnt = 0;
+    for (uint8_t i = 0; i < n && cnt < POLY_MAX * 2; i++) {
+      float ax = px[i], ay = py[i];
+      float bx = px[(i + 1) % n], by = py[(i + 1) % n];
+      if ((ay <= y && by > y) || (by <= y && ay > y)) {
+        xs[cnt++] = ax + (y - ay) / (by - ay) * (bx - ax);
+      }
+    }
+    for (uint8_t a = 1; a < cnt; a++) {          // 작은 순으로 정렬
+      float v = xs[a];
+      int8_t b = a - 1;
+      while (b >= 0 && xs[b] > v) { xs[b + 1] = xs[b]; b--; }
+      xs[b + 1] = v;
+    }
+    bool on = toneOn(y, tone);
+    for (uint8_t i = 0; i + 1 < cnt; i += 2) {
+      int16_t xa = (int16_t)lroundf(xs[i]), xb = (int16_t)lroundf(xs[i + 1]);
+      for (int16_t x = xa; x <= xb; x++) {
+        display.drawPixel(x, y, on ? SSD1306_WHITE : SSD1306_BLACK);
+      }
+    }
+  }
+}
+
+void fillEllipseTone(float cx, float cy, float rx, float ry, uint8_t tone) {
+  int16_t y0 = (int16_t)floorf(cy - ry), y1 = (int16_t)ceilf(cy + ry);
+  if (y0 < 0) y0 = 0;
+  if (y1 > SCREEN_HEIGHT - 1) y1 = SCREEN_HEIGHT - 1;
+  for (int16_t y = y0; y <= y1; y++) {
+    float dy = (y - cy) / ry;
+    if (dy < -1.0f || dy > 1.0f) continue;
+    float span = rx * sqrtf(1.0f - dy * dy);
+    bool on = toneOn(y, tone);
+    for (int16_t x = (int16_t)floorf(cx - span); x <= (int16_t)ceilf(cx + span); x++) {
+      display.drawPixel(x, y, on ? SSD1306_WHITE : SSD1306_BLACK);
+    }
+  }
+}
+
+// 굵기가 변하는 선분. 팔이 어깨 쪽은 굵고 손 쪽은 가늘어진다.
+void segTone(float x0, float y0, float x1, float y1, float w0, float w1, uint8_t tone) {
+  float dx = x1 - x0, dy = y1 - y0;
+  float L = sqrtf(dx * dx + dy * dy);
+  if (L < 0.001f) L = 1.0f;
+  float nx = -dy / L, ny = dx / L;
+  float px[4] = { x0 + nx * w0, x1 + nx * w1, x1 - nx * w1, x0 - nx * w0 };
+  float py[4] = { y0 + ny * w0, y1 + ny * w1, y1 - ny * w1, y0 - ny * w0 };
+  fillPolyTone(px, py, 4, tone);
+}
+
+// 상반신 캐릭터를 그린다. 골반선은 그리지 않는다.
+// tools/preview/render_character.py 의 style_shaded() 와 같은 순서·같은 값이어야 한다.
+void drawFigure() {
+  float smx = (jx(J_SH_L) + jx(J_SH_R)) * 0.5f;
+  float smy = (jy(J_SH_L) + jy(J_SH_R)) * 0.5f;
+  float wmx = (jx(J_HIP_L) + jx(J_HIP_R)) * 0.5f;
+  float wmy = (jy(J_HIP_L) + jy(J_HIP_R)) * 0.5f;
+
+  float dx = jx(J_SH_R) - jx(J_SH_L), dy = jy(J_SH_R) - jy(J_SH_L);
+  float L = sqrtf(dx * dx + dy * dy);
+  if (L < 0.001f) L = 1.0f;
+  float ux = dx / L, uy = dy / L, h = L * 0.5f;
+  const float NARROW = 0.6f;
+
+  float hx = jx(J_HEAD), hy = jy(J_HEAD) - 1.0f;
+
+  segTone(hx, hy + 5, smx, smy, 2.0f, 2.6f, TONE_MID);          // 목 — 턱 그늘
+
+  // 몸통을 반으로 갈라 왼쪽은 빛, 오른쪽은 그늘
+  float qx[4] = { smx - ux * h, smx + ux * h,
+                  wmx + ux * h * NARROW, wmx - ux * h * NARROW };
+  float qy[4] = { smy - uy * h, smy + uy * h,
+                  wmy + uy * h * NARROW, wmy - uy * h * NARROW };
+  float mtx = (qx[0] + qx[1]) * 0.5f, mty = (qy[0] + qy[1]) * 0.5f;
+  float mbx = (qx[2] + qx[3]) * 0.5f, mby = (qy[2] + qy[3]) * 0.5f;
+
+  float lx[4] = { qx[0], mtx, mbx, qx[3] };
+  float ly[4] = { qy[0], mty, mby, qy[3] };
+  fillPolyTone(lx, ly, 4, TONE_LIT);
+  float rx[4] = { mtx, qx[1], qx[2], mbx };
+  float ry[4] = { mty, qy[1], qy[2], mby };
+  fillPolyTone(rx, ry, 4, TONE_MID);
+
+  const uint8_t arms[2][3] = { { J_SH_L, J_EL_L, J_WR_L },
+                               { J_SH_R, J_EL_R, J_WR_R } };
+  for (uint8_t a = 0; a < 2; a++) {
+    uint8_t tone = (a == 0) ? TONE_LIT : TONE_MID;
+    segTone(jx(arms[a][0]), jy(arms[a][0]), jx(arms[a][1]), jy(arms[a][1]), 3.0f, 2.2f, tone);
+    segTone(jx(arms[a][1]), jy(arms[a][1]), jx(arms[a][2]), jy(arms[a][2]), 2.2f, 1.4f, tone);
+    fillEllipseTone(jx(arms[a][2]), jy(arms[a][2]), 1.8f, 1.8f, TONE_LIT);
+  }
+
+  // 머리 — 머리카락을 먼저 덮고 그 아래로 얼굴을 파낸다.
+  // 납작한 모자처럼 보이지 않게 이마 선을 곡선으로 두고 가운데에 가르마를 준다.
+  fillEllipseTone(hx, hy - 1, 8, 9, TONE_DARK);
+  fillEllipseTone(hx, hy + 2, 6, 6, TONE_LIT);
+  fillEllipseTone(hx + 2, hy + 3, 4, 4, TONE_MID);
+  float fx[5] = { hx - 1, hx + 1, hx + 2, hx, hx - 2 };
+  float fy[5] = { hy - 6, hy - 6, hy - 1, hy + 1, hy - 1 };
+  fillPolyTone(fx, fy, 5, TONE_DARK);
+  display.drawPixel((int16_t)hx - 4, (int16_t)hy + 3, SSD1306_BLACK);
+  display.drawPixel((int16_t)hx - 3, (int16_t)hy + 3, SSD1306_BLACK);
+  display.drawPixel((int16_t)hx + 2, (int16_t)hy + 3, SSD1306_BLACK);
+  display.drawPixel((int16_t)hx + 3, (int16_t)hy + 3, SSD1306_BLACK);
+}
+
+// ─────────────────────────────────────────────────────────────
 // 버튼 — 배경 바꾸기
 // 버튼을 누르면 PC 와 상관없이 보드가 즉시 배경을 바꾼다.
 // 지금 배경이 몇 번인지는 같은 번호의 LED 로 알려준다.
@@ -632,6 +807,26 @@ void drawBars() {
   }
 }
 
+// 댄스 모드용 — 왼쪽에 세로로 세운 막대. 위에서 아래로 저역→고역.
+void drawBarsLeft() {
+  for (uint8_t i = 0; i < BAR_COUNT; i++) {
+    uint8_t target = barLevel[i];
+    if (target >= barShown[i]) {
+      barShown[i] = target;
+    } else {
+      uint8_t drop = (barShown[i] - target) / 3;
+      barShown[i] = (drop == 0) ? target : barShown[i] - drop;
+    }
+
+    int16_t w = ((int32_t)barShown[i] * VBAR_MAX) / 255;
+    int16_t y = i * (VBAR_H + VBAR_GAP);
+
+    display.fillRect(0, y, VBAR_MAX + 1, VBAR_H, SSD1306_BLACK);
+    if (w < 1) w = 1;
+    display.fillRect(0, y, w, VBAR_H, SSD1306_WHITE);
+  }
+}
+
 // ─────────────────────────────────────────────────────────────
 // 화면 그리기
 // ─────────────────────────────────────────────────────────────
@@ -643,12 +838,21 @@ void drawScreen(uint32_t now) {
 
   drawBackground(currentBg, tsec, beat);
 
-  if (linkActive) {
+  // 관절 좌표가 들어오고 있으면 댄스 모드다. 가사는 그리지 않는다 —
+  // 형체가 화면 가운데를 다 쓰기 때문에 둘이 겹치면 아무것도 안 읽힌다.
+  if (poseActive && now - lastPoseMs > LINK_TIMEOUT_MS) poseActive = false;
+
+  if (poseActive) {
+    drawFigure();
+  } else if (linkActive) {
     drawLyric(lyricText, bgUsesOutline(currentBg));
   } else {
     drawLyric("대기중", bgUsesOutline(currentBg));
   }
 
-  drawBars();
+  // 막대는 모드에 따라 자리가 다르다.
+  // 가사 모드는 아래 가로(촬영한 그대로), 댄스 모드는 왼쪽 세로.
+  if (poseActive) drawBarsLeft();
+  else            drawBars();
   display.display();
 }
