@@ -1,0 +1,22 @@
+# 실행 환경·빌드 산출물
+.venv/
+.cache/
+build/
+__pycache__/
+*.pyc
+
+# 가사와 음원은 저장소에 넣지 않는다.
+# 남의 저작물이고, host/fetch_lyrics.py 로 링크만 있으면 다시 받을 수 있다.
+# 형식 예시 겸 화면 시험용인 _테스트.lrc 만 남긴다.
+lyrics/*.lrc
+!lyrics/_테스트.lrc
+lyrics/*.txt
+*.mp3
+*.m4a
+*.wav
+
+# 미리보기로 뽑은 PNG (필요하면 도구로 다시 만든다)
+tools/preview/*.png
+
+# yt-dlp 단독 바이너리 (36MB). 저장소에 넣지 않고 README 대로 내려받는다.
+host/bin/
